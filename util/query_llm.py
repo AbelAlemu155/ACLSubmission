@@ -2,9 +2,11 @@ import time
 import random
 from openai import BadRequestError
 #  model config is a map that holds name and cost_per_1k_tokens
-def query_llm(client, model_configs, prompt, max_tokens, role, un_to_comply, messages=None, fs_examples=None, assistants=None,  temperature=0 , top_p=1, max_retries=5):
+def query_llm(client, model_configs, prompt, max_tokens, role, un_to_comply, messages=None, fs_examples=None, assistants=None,  temperature=0 , top_p=1, max_retries=8):
     model_config= model_configs[0]
     if(messages is None):
+    #   role= "You are a medical expert. All answers should be a maximum of 3 sentences" if role is None else role
+      role= "You are a law expert. All answers should be a maximum of 3 sentences" if role is None else role
       messages = [{"role": "system", "content": role}]
       if fs_examples is not None:
           for query, response in fs_examples:
