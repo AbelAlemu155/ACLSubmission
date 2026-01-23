@@ -136,7 +136,6 @@ def pubmed_evaluate(pubmed_df, evaluator , client, model_configs,un_to_comply, n
 
       #   role = "Answer only with one of these words: yes, no, or maybe. Use the contexts and labels from the research papers to provide an accurate answer to the question.\n"
       system_prompt = (
-        "You are a medical question-answering expert for PubmedQA style questions.\n"
         "Carefully analyze the question using the provided contexts from a research paper.\n"
         "Think step-by-step internally to reach the correct conclusion.\n "
         "All reasoning must be grounded exclusively in the provided context. \n"

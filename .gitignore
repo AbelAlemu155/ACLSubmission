@@ -208,3 +208,12 @@ __marimo__/
 
 data/
 results/
+
+ClassifierEnsembleAndOpenEval.ipynb
+closedsource_evaluation.ipynb
+
+evaluation_llama4_guard.ipynb
+
+final_eval_aws.ipynb
+plots.ipynb
+opensourceeval.ipynb
