@@ -1,6 +1,6 @@
 import time
 import torch,re
-
+from ..util.build_model_objects import build_model_objects
 from debate_codes.opensource.util.load_models import load_model_and_tokenizer
 
 # def query_one_model(model_paths, batch_messages, batch_prompts= None,
@@ -249,11 +249,159 @@ def query_one_model(model_objects, batch_messages, batch_prompts= None,
         results.append(clean_text)
         total_cost+=cost_usd
         
+    log_prob_batches= None
+    return results, log_prob_batches, time_taken, total_cost
 
-    return results, time_taken, total_cost
 
 
+def query_log_prob(model_objects, batch_messages, batch_prompts= None,
+ rounds= 0):
 
+    # model_path= model_paths[0]
+    """
+    Run a batch of messages through a model and return responses with time and cost.
+
+    Args:
+        model_path (str): Path to the model.
+        batch_messages (list): Each element is a multi-turn message history, e.g.,
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "..."}]
+
+    Returns:
+        list of dict: Each dict contains:
+            - response (str)
+            - tokens_generated (int)
+            - time_taken (float)
+            - cost_usd (float)
+    """
+
+    model = model_objects[0]['model']
+    model_path= model.config._name_or_path
+    tokenizer= model_objects[0]['tokenizer']
+    # Convert multi-turn messages to batch prompts using tokenizer's chat template
+    # batch_prompts = [tokenizer.apply_chat_template(message_history) for message_history in batch_messages]
+    if("Qwen" in model_path):
+        batch_prompts = [
+        tokenizer.apply_chat_template(
+            message_history,
+            tokenize=False,
+            add_generation_prompt=True, 
+            enable_thinking=False
+        )
+        for message_history in batch_messages
+        ]
+    else:
+        batch_prompts = [
+        tokenizer.apply_chat_template(
+            message_history,
+            tokenize=False,
+            add_generation_prompt=True, 
+        )
+        for message_history in batch_messages
+        ]
+
+    # print(batch_prompts)
+    # Tokenize batch prompts
+    # print(f"first step: {batch_prompts}")
+    inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
+    # print(f"second step: {inputs}: length: {len(inputs)}")
+    # Generate responses for the batch
+    start_time = time.time()
+    
+    custom_gen_config={}
+    if ("Qwen" in model_path):
+        custom_gen_config={
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0
+        }
+    
+    with torch.no_grad():
+        
+
+        outputs = model.generate(
+                **inputs,
+                max_new_tokens=400,
+                do_sample=True,
+                use_cache=True, 
+                
+                temperature=custom_gen_config.get("temperature", 0.6),
+                top_p=custom_gen_config.get("top_p", 1.0),
+                top_k=custom_gen_config.get("top_k", 50))
+    
+    # print("third step")
+    time_taken = time.time() - start_time
+
+    # Decode only newly generated tokens
+    batch_responses = tokenizer.batch_decode(
+        outputs[:, inputs["input_ids"].shape[1]:],
+        skip_special_tokens=True
+    )
+    # print(batch_responses)
+    # print(f"batch_responses {batch_responses}")
+    # Calculate tokens and cost for each response
+    results = []
+    log_probs_batch=[]
+    total_cost=0
+    for response_text, prompt in zip(batch_responses, batch_prompts):
+        prompt_tokens = len(tokenizer(prompt)["input_ids"])
+        response_tokens = len(tokenizer(response_text)["input_ids"])
+        total_tokens = prompt_tokens + response_tokens
+
+        # Cost calculation
+        if "Qwen" in model_path:
+            cost_usd = total_tokens / 1_000_000 * 3.5
+        elif "Deepseek" in model_path:
+            cost_usd = total_tokens / 1_000_000 * 2.5
+        else:
+            cost_usd = 0.0
+        
+        # clean_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL)
+        clean_text= split_explanation_answer(response_text)
+        clean_text = clean_text.strip()
+        results.append(clean_text)
+        options = [" yes", " no", " maybe"]
+        # scores = {opt.strip(): [] for opt in options}
+        scores={}
+        conditioned_prompt = prompt + clean_text + "Final answer:"
+        # print(clean_text)
+        for opt in options:
+            score = get_answer_logprob(conditioned_prompt, opt, model, tokenizer)
+            scores[opt.strip()]= score
+        log_probs_batch.append(scores)
+        # print(log_probs_batch)
+        total_cost+=cost_usd
+        
+    return results,log_probs_batch, time_taken, total_cost
+
+
+def get_answer_logprob(prompt_with_expl, answer, model, tokenizer):
+    full_text = prompt_with_expl + answer
+
+    # tokenize
+    prompt_ids = tokenizer(prompt_with_expl, return_tensors="pt").input_ids.to(model.device)
+    full_ids = tokenizer(full_text, return_tensors="pt").input_ids.to(model.device)
+
+    labels = full_ids.clone()
+    labels[:, :prompt_ids.shape[1]] = -100  # mask prompt + explanation
+
+    with torch.no_grad():
+        outputs = model(input_ids=full_ids, labels=labels)
+
+    avg_logprob = -outputs.loss.item()
+
+    # total logprob over answer tokens
+    answer_len = full_ids.shape[1] - prompt_ids.shape[1]
+    total_logprob = avg_logprob * answer_len
+
+    return total_logprob
+
+
+def split_explanation_answer(text):
+    match = re.search(re.escape("Final answer:"), text, re.IGNORECASE)
+    if(match):
+        return text[:match.start()]
+    return text  # fallback
 
 if __name__== "__main__":
     # {"role": "system", "content":"You are an assitant"}
@@ -261,4 +409,8 @@ if __name__== "__main__":
     # batch_messages= ["what is your name"]
     # model_paths= ["Qwen/Qwen3-8B"]
     model_paths= ["deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"]
-    print(query_one_model(model_paths, batch_messages))
+    # print(query_one_model(model_paths, batch_messages))
+    
+    model_objects= build_model_objects(model_paths)
+    query_log_prob(model_objects, batch_messages )
+

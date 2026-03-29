@@ -3,18 +3,20 @@ from collections import Counter
 import re,json
 from debate_codes.opensource.util.construct_message import construct_message
 
-from debate_codes.opensource.util.query_model import query_one_model
+from debate_codes.opensource.util.query_model import query_one_model, query_log_prob
 from debate_codes.data_processing import read_pubmed
-def evaluate_pubmed(pubmed_df, model_paths,evaluator, num_iter_eval = 1,
- batch_size=1, pubmed_file_path="pubmed.json"):
+from ..util.build_model_objects import build_model_objects
+def evaluate_pubmed_legal(df, model_paths,evaluator,batch_constructor,num_iter_eval = 1,
+ batch_size=8, file_path="pubmed.json"):
     final_answers = []
     total_time =0
     total_cost=0
-    for start in tqdm(range(0, len(pubmed_df), batch_size)):
+    model_objects= build_model_objects(model_paths)
+    for start in tqdm(range(0, len(df), batch_size)):
         
         batch_prompts = []    
         batch_messages=[]
-        batch_df = pubmed_df.iloc[start:start+batch_size]
+        batch_df = df.iloc[start:start+batch_size]
         for ind, row in batch_df.iterrows():
             query = row['QUESTION']
             context = row['CONTEXTS']
@@ -40,39 +42,31 @@ def evaluate_pubmed(pubmed_df, model_paths,evaluator, num_iter_eval = 1,
             batch_messages.append(construct_message(system_prompt, prompt))
 
         answers = [[] for _ in range(batch_size)]
-
+        options = [" yes", " no", " maybe"]
+        log_prob_batches= [{opt.strip(): 0 for opt in options} for _ in range(len(batch_messages))]
         # Generate 3 outputs per query
         cur_time , cur_cost=0, 0
         for _ in range(num_iter_eval):
-            responses, est_time, cost  = evaluator(model_paths, batch_messages, batch_prompts= batch_prompts, rounds= round)
+            _,lpb, est_time, cost  = evaluator(model_objects, batch_messages, batch_prompts= batch_prompts, rounds= round)
             cur_time += est_time
             cur_cost += cost 
-            for ind,resp in enumerate(responses):
-                pattern = re.compile(r'(?i)\b(yes|no|maybe)\b')
-                match = pattern.search(resp)
-                if match:
-                    answer = match.group(1).lower()
-                    answers[ind].append(answer)
+            for ind,lprob in enumerate(lpb):
+                for k,v in lprob.items():
+                    log_prob_batches[ind][k] += v  
+        # log_prob_batches = [{k: v/num_iter_eval for k,v in lprob.items()}  for lprob in log_prob_batches] 
+        for lprob in log_prob_batches:
+            max_key= max(lprob, key=lprob.get) 
+            final_answers.append(max_key)     
         cur_avg_time= cur_time/num_iter_eval
         cur_avg_cost= cur_cost/num_iter_eval
         total_time += cur_avg_time
         total_cost += cur_avg_cost
-        print(answers)
-        for ans in answers:
-           most_common = Counter(ans).most_common(1)[0][0] if ans else "unknown"
-           final_answers.append(most_common)
-    avg_time = total_time/len(pubmed_df)
-    avg_cost = total_cost/len(pubmed_df)
+       
+        
+    avg_time = total_time/len(df)
+    avg_cost = total_cost/len(df)
     print(f"final answers: {final_answers}")
-    save_results(final_answers,total_time, cost, pubmed_df, pubmed_file_path)
-
-def get_context_with_labels(context, labels):
-      lines = context.split('\n')
-      # Remove empty lines and strip spaces
-      contexts = [line.strip() for line in lines if line.strip()]
-      label_list= labels.split(',')
-      context_label_list =[f'{label_list[i]}:{contexts[i]}' for i in range(len(contexts))]
-      return "/n".join(context_label_list)
+    save_results(final_answers,avg_time, avg_cost, df, file_path)
 
 
 def evaluate_multi(generated_ans, correct_ans):
@@ -83,10 +77,10 @@ def evaluate_multi(generated_ans, correct_ans):
 
 
 
-def save_results(pubmed_answers,latency, cost, pubmed_df, pubmed_file_path):
+def save_results(pubmed_answers,latency, cost, df, file_path):
  
     results={}
-    accuracy = evaluate_multi(pubmed_answers, pubmed_df.iloc[:len(pubmed_answers)]['final_decision'].tolist())
+    accuracy = evaluate_multi(pubmed_answers, df.iloc[:len(pubmed_answers)]['final_decision'].tolist())
     results['answers']= pubmed_answers
     results['latency']= latency
     results['cost']=cost
@@ -96,15 +90,15 @@ def save_results(pubmed_answers,latency, cost, pubmed_df, pubmed_file_path):
     print(f"cost: {cost}")
     print(f"latency: {latency}")
     try:
-        with open(pubmed_file_path, 'w') as json_file:
+        with open(file_path, 'w') as json_file:
             json.dump(results, json_file, indent=4)
     
     except IOError as e:
         print(f"Error writing to file : {e}")
 
 if __name__=="__main__": 
-    pubmed_df= read_pubmed()
+    df= read_pubmed()
     deeps_path="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
     qwen_path= "Qwen/Qwen3-8B"
     model_paths=[qwen_path]
-    evaluate_pubmed(pubmed_df.iloc[1:3], model_paths,query_one_model)
+    evaluate_pubmed_legal(df, model_paths,query_log_prob, file_path="qwen_pubmed.json")
